@@ -1,6 +1,6 @@
 # Building a Venice voice agent
 
-Venice can hear you and talk back. It does **not** expose a speech-to-speech Realtime API, so we stitch three ordinary HTTP calls together:
+Venice can hear you and talk back. In this demo we stitch three ordinary HTTP calls together:
 
 1. Speech to text (`POST /audio/transcriptions`)
 2. A short chat reply (`POST /chat/completions`)
@@ -132,7 +132,7 @@ Check the HTTP status and content type before you treat the body as PCM. A JSON 
 
 ## Notes
 
-Venice does not have a speech-to-speech model you can stream both ways. The LiveKit guide uses this same STT → LLM → TTS shape for that reason.
+The LiveKit guide uses this same STT → LLM → TTS shape.
 
 The system prompt lives in `venice.py`. It is sent as `role=system` on every turn. If someone asks what Venice is, we mean the product, not the Italian city.
 
@@ -144,7 +144,7 @@ uv run pytest
 
 ## Finishing up
 
-The thing to take away: you do not need a Realtime websocket to build a voice agent on Venice. Three OpenAI-compatible endpoints, streamed, are enough.
+The thing to take away: a voice agent on Venice is three OpenAI-compatible endpoints, streamed.
 
 Swap `VENICE_LLM_MODEL` if you want a different chat model. Full GLM 5.3 is `z-ai-glm-5-3`; Flash is `z-ai-glm-5-3-flash`.
 

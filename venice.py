@@ -1,7 +1,7 @@
 """Venice API calls for one spoken turn.
 
-Venice is OpenAI-compatible at https://api.venice.ai/api/v1. There is no
-speech-to-speech Realtime API, so a voice turn is three HTTP calls:
+Venice is OpenAI-compatible at https://api.venice.ai/api/v1. A voice turn is
+three HTTP calls:
 
 1. POST /audio/transcriptions — speech to text
 2. POST /chat/completions — streamed reply
