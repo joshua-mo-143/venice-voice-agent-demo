@@ -1,103 +1,111 @@
 from __future__ import annotations
 
-import io
-import signal
-from pathlib import Path
+from io import BytesIO
 from typing import Any
+from wave import open as open_wav
 
 import pytest
 
 import audio
 
 
-class FakeProcess:
-    def __init__(self, *, fail_immediately: bool = False) -> None:
-        self.returncode: int | None = 1 if fail_immediately else None
-        self.stdin = io.BytesIO()
-        self.stderr = io.BytesIO(b"boom" if fail_immediately else b"")
-        self.signals: list[int] = []
-        self.killed = False
+class FakeInputStream:
+    def __init__(self, callback: Any, pcm: bytes = b"") -> None:
+        self.callback = callback
+        self.pcm = pcm
+        self.started = False
+        self.closed = False
 
-    def poll(self) -> int | None:
-        return self.returncode
+    def start(self) -> None:
+        self.started = True
+        if self.pcm:
+            self.callback(self.pcm, len(self.pcm) // 2, None, None)
 
-    def send_signal(self, sig: int) -> None:
-        self.signals.append(sig)
-        self.returncode = -sig
+    def stop(self) -> None:
+        return None
 
-    def terminate(self) -> None:
-        self.returncode = -signal.SIGTERM
-
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = -signal.SIGKILL
-
-    def wait(self, timeout: float | None = None) -> int:
-        if self.returncode is None:
-            self.returncode = 0
-        return self.returncode
+    def close(self) -> None:
+        self.closed = True
 
 
-def test_cancel_during_listen_deletes_temp_wav(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    wav = tmp_path / "clip.wav"
-    wav.write_bytes(b"RIFF" + b"\x00" * 40 + b"speech")
-    process = FakeProcess()
+class FakeOutputStream:
+    def __init__(self) -> None:
+        self.written: list[bytes] = []
+        self.aborted = False
+        self.stopped = False
+        self.closed = False
 
-    class FakeTemp:
-        def __init__(self, **kwargs: Any) -> None:
-            self.name = str(wav)
+    def start(self) -> None:
+        return None
 
-        def close(self) -> None:
-            return None
+    def write(self, data: bytes) -> None:
+        self.written.append(bytes(data))
 
-    monkeypatch.setattr(audio.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(audio.tempfile, "NamedTemporaryFile", lambda **kwargs: FakeTemp())
-    monkeypatch.setattr(audio.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(audio, "_wait_until_recording", lambda proc, path: None)
+    def abort(self) -> None:
+        self.aborted = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_pcm_to_wav_wraps_s16le() -> None:
+    pcm = b"\x00\x01" * 16
+    wav_bytes = audio.pcm_to_wav(pcm, 16_000)
+    assert wav_bytes.startswith(b"RIFF")
+    with open_wav(BytesIO(wav_bytes), "rb") as wav:
+        assert wav.getnchannels() == 1
+        assert wav.getsampwidth() == 2
+        assert wav.getframerate() == 16_000
+        assert wav.readframes(16) == pcm
+
+
+def test_cancel_during_listen(monkeypatch: pytest.MonkeyPatch) -> None:
+    stream = FakeInputStream(lambda *args: None)
+    monkeypatch.setattr(audio, "require_audio", lambda: None)
+    monkeypatch.setattr(audio, "_open_input_stream", lambda callback: stream)
     monkeypatch.setattr(
         audio,
         "_wait_for_enter_or_limit",
-        lambda proc, seconds: (_ for _ in ()).throw(KeyboardInterrupt()),
+        lambda stopped, seconds: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
 
     with pytest.raises(audio.AudioError, match="cancelled"):
         audio.record_until_enter()
 
-    assert not wav.exists()
-    assert signal.SIGINT in process.signals
+    assert stream.closed
 
 
-def test_successful_record_deletes_temp_wav(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    wav = tmp_path / "clip.wav"
-    payload = b"RIFF" + b"\x00" * 40 + b"speech"
-    wav.write_bytes(payload)
-    process = FakeProcess()
+def test_record_returns_in_memory_wav(monkeypatch: pytest.MonkeyPatch) -> None:
+    pcm = b"\x01\x00" * 20
 
-    class FakeTemp:
-        def __init__(self, **kwargs: Any) -> None:
-            self.name = str(wav)
+    def open_stream(callback: Any) -> FakeInputStream:
+        return FakeInputStream(callback, pcm)
 
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr(audio.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(audio.tempfile, "NamedTemporaryFile", lambda **kwargs: FakeTemp())
-    monkeypatch.setattr(audio.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(audio, "_wait_until_recording", lambda proc, path: None)
-    monkeypatch.setattr(audio, "_wait_for_enter_or_limit", lambda proc, seconds: None)
+    monkeypatch.setattr(audio, "require_audio", lambda: None)
+    monkeypatch.setattr(audio, "_open_input_stream", open_stream)
+    monkeypatch.setattr(audio, "_wait_for_enter_or_limit", lambda stopped, seconds: None)
 
     recorded = audio.record_until_enter()
-    assert recorded == payload
-    assert not wav.exists()
+    with open_wav(BytesIO(recorded), "rb") as wav:
+        assert wav.readframes(20) == pcm
 
 
-def test_pcm_player_close_does_not_mask_existing_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(audio.shutil, "which", lambda name: f"/usr/bin/{name}")
+def test_pcm_player_close_does_not_mask_existing_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audio, "require_audio", lambda: None)
     player = audio.PcmPlayer()
-    process = FakeProcess()
-    process.returncode = 1
-    process.stderr = io.BytesIO(b"device gone")
-    player._process = process
+    stream = FakeOutputStream()
+
+    def boom(_data: bytes) -> None:
+        raise RuntimeError("device gone")
+
+    stream.write = boom  # type: ignore[method-assign]
+    player._stream = stream
+    player._pending = b"\x00"
     with pytest.raises(RuntimeError, match="original"):
         try:
             raise RuntimeError("original")
@@ -105,11 +113,12 @@ def test_pcm_player_close_does_not_mask_existing_error(monkeypatch: pytest.Monke
             player.close(raise_on_error=False)
 
 
-def test_pcm_player_abort_stops_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(audio.shutil, "which", lambda name: f"/usr/bin/{name}")
+def test_pcm_player_abort_stops_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(audio, "require_audio", lambda: None)
     player = audio.PcmPlayer()
-    process = FakeProcess()
-    player._process = process
+    stream = FakeOutputStream()
+    player._stream = stream
     player.abort()
-    assert player._process is None
-    assert process.returncode is not None
+    assert player._stream is None
+    assert stream.aborted
+    assert stream.closed

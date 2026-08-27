@@ -1,7 +1,7 @@
 """Terminal loop: press Enter to talk, hear a spoken reply.
 
 Each turn is STT → streamed chat → streamed TTS. venice.py owns the API
-calls; audio.py owns PipeWire record/play. This file is just the prompt.
+calls; audio.py owns local record/play. This file is just the prompt.
 """
 
 from __future__ import annotations
@@ -155,7 +155,7 @@ def main() -> None:
         client = venice.load_client()
         voice = venice.resolve_voice(args.voice)
         if not args.text_only:
-            audio.require_pipewire()
+            audio.require_audio()
         print(_dim("Warming up…"), flush=True)
         sample_rate = venice.warmup(client, voice, tts=not args.text_only)
     except (venice.VeniceError, audio.AudioError) as exc:

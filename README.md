@@ -8,7 +8,7 @@ Venice can hear you and talk back. In this demo we stitch three ordinary HTTP ca
 
 In this demo, we'll build that loop as a terminal app. Press Enter, speak, press Enter again, and the reply plays through your speakers. You can type a line instead of using the mic.
 
-This is the same pipeline as the [LiveKit Agents guide](https://docs.venice.ai/guides/integrations/livekit-agents), without LiveKit, wake words, or tools. The interesting part is the Venice API. Recording and playback are local PipeWire (`pw-record` / `pw-play`).
+This is the same pipeline as the [LiveKit Agents guide](https://docs.venice.ai/guides/integrations/livekit-agents), without LiveKit, wake words, or tools. The interesting part is the Venice API. Recording and playback use [sounddevice](https://python-sounddevice.readthedocs.io/) (PortAudio), so the same code runs on macOS, Windows, and Linux.
 
 By the end you should be able to lift `venice.py` into your own app and know why we stream both the chat tokens and the PCM.
 
@@ -26,8 +26,8 @@ The source tree stays small on purpose:
 .
 ├── app.py          # prompt loop: listen, print, play
 ├── venice.py       # the three API calls
-├── audio.py        # PipeWire record / play (not the API)
-├── tests/          # sentence splitting, cleanup, PCM checks
+├── audio.py        # local record / play via PortAudio (not the API)
+├── tests/          # sentence splitting, WAV wrapping, PCM checks
 ├── .env.example
 └── pyproject.toml
 ```
@@ -36,22 +36,39 @@ The source tree stays small on purpose:
 
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - A Venice API key from [venice.ai](https://venice.ai)
-- PipeWire (`pw-record` and `pw-play`) if you want the microphone. On Arch: `paru -S --needed pipewire`
+- A microphone and speakers if you want the full voice loop
 
-`--text-only` skips PipeWire entirely and still hits chat + TTS.
+Recording and playback go through [sounddevice](https://python-sounddevice.readthedocs.io/), which uses PortAudio. `uv sync` installs the Python package. On Windows that is enough. On macOS and Linux you also need the PortAudio library:
+
+```bash
+# macOS
+brew install portaudio
+
+# Debian / Ubuntu
+sudo apt install libportaudio2
+
+# Arch
+paru -S --needed portaudio
+```
+
+`--text-only` skips the mic and still hits chat + TTS. Use that if you just want to try the API calls.
 
 ## Getting started
 
-```fish
+```bash
 cp .env.example .env
-# put the key in .env as VENICE_API_KEY
+```
+
+Put your key in `.env` as `VENICE_API_KEY`, then:
+
+```bash
 uv sync
 uv run python app.py
 ```
 
 Press Enter, speak, press Enter again. Type a line if you do not want to use the mic. `reset` starts a new conversation. `q` quits. Ctrl+C during a reply stops playback and returns to the prompt.
 
-```fish
+```bash
 uv run python app.py --voice am_adam
 uv run python app.py --voice af_heart
 uv run python app.py --text-only
@@ -59,7 +76,13 @@ uv run python app.py --text-only
 
 `--voice` is passed through to Kokoro. Unknown ids fail at the API instead of silently falling back.
 
-The API key stays in your environment. Microphone audio is written to a temp WAV, transcribed, and deleted afterward — including if you cancel or the turn errors. Recordings stop after 30 seconds.
+If the mic or speakers are wrong, list devices and set `AUDIO_SOURCE` / `AUDIO_SINK` in `.env` to a name or index:
+
+```bash
+uv run python -c "import sounddevice; print(sounddevice.query_devices())"
+```
+
+The API key stays in your environment. Microphone audio stays in memory, gets a WAV header, and is sent to Venice. Nothing is written to disk. Recordings stop after 30 seconds.
 
 ## How a turn works
 
@@ -114,7 +137,7 @@ stream = client.chat.completions.create(
 
 ### 3. Speak
 
-`POST /audio/speech` with `response_format="pcm"` and `streaming: True`. We write raw s16le (24 kHz mono) straight into `pw-play --raw`, so playback does not wait for an MP3 to finish downloading.
+`POST /audio/speech` with `response_format="pcm"` and `streaming: True`. We write raw s16le (24 kHz mono) straight into a PortAudio output stream, so playback does not wait for an MP3 to finish downloading.
 
 ```python
 with client.audio.speech.with_streaming_response.create(
@@ -128,7 +151,7 @@ with client.audio.speech.with_streaming_response.create(
         player.write(chunk)
 ```
 
-Check the HTTP status and content type before you treat the body as PCM. A JSON error written into `pw-play --raw` is a loud burst of noise.
+Check the HTTP status and content type before you treat the body as PCM. A JSON error written into a raw speaker stream is a loud burst of noise.
 
 ## Notes
 
@@ -136,9 +159,9 @@ The LiveKit guide uses this same STT → LLM → TTS shape.
 
 The system prompt lives in `venice.py`. It is sent as `role=system` on every turn. If someone asks what Venice is, we mean the product, not the Italian city.
 
-This demo is Linux + PipeWire. The API calls in `venice.py` are the portable part.
+`audio.py` is the only OS-specific file, and PortAudio is the portability layer. The API calls in `venice.py` do not care which machine you are on.
 
-```fish
+```bash
 uv run pytest
 ```
 
